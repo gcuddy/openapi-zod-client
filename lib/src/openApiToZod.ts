@@ -89,13 +89,15 @@ export function getZodSchema({ schema: $schema, ctx, meta: inheritedMeta, option
 
         /* when there are multiple allOf we are unable to use a discriminatedUnion as this library adds an
          *   'z.and' to the schema that it creates which breaks type inference */
-        const hasMultipleAllOf = schema.oneOf?.some((obj) => isSchemaObject(obj) && (obj?.allOf || []).length > 1);
+        const hasMultipleAllOf = schema.oneOf?.some((obj) => isSchemaObject(obj) && (obj?.allOf ?? []).length > 1);
         if (schema.discriminator && !hasMultipleAllOf) {
             const propertyName = schema.discriminator.propertyName;
 
             return code.assign(`
                 z.discriminatedUnion("${propertyName}", [${schema.oneOf
-                .map((prop) => getZodSchema({ schema: prop, ctx, meta, options }))
+                .map((prop) =>
+                    getZodSchema({ schema: prop, ctx, meta: { ...meta, discriminatorProperty: propertyName }, options })
+                )
                 .join(", ")}])
             `);
         }
@@ -146,7 +148,7 @@ export function getZodSchema({ schema: $schema, ctx, meta: inheritedMeta, option
             return zodSchema;
         });
 
-        if (composedRequiredSchema.required.length) {
+        if (composedRequiredSchema.required.length > 0) {
             types.push(
                 getZodSchema({
                     schema: composedRequiredSchema,
@@ -156,6 +158,7 @@ export function getZodSchema({ schema: $schema, ctx, meta: inheritedMeta, option
                 })
             );
         }
+
         const first = types.at(0)!;
         const rest = types
             .slice(1)
@@ -175,10 +178,8 @@ export function getZodSchema({ schema: $schema, ctx, meta: inheritedMeta, option
                     return code.assign(`z.literal(${valueString})`);
                 }
 
-                // eslint-disable-next-line sonarjs/no-nested-template-literals
-                return code.assign(
-                    `z.enum([${schema.enum.map((value) => (value === null ? "null" : `"${value}"`)).join(", ")}])`
-                );
+                const enumValues = schema.enum.map((value) => (value === null ? "null" : `"${value}"`)).join(", ");
+                return code.assign(`z.enum([${enumValues}])`);
             }
 
             if (schema.enum.some((e) => typeof e === "string")) {
@@ -213,15 +214,11 @@ export function getZodSchema({ schema: $schema, ctx, meta: inheritedMeta, option
     if (schemaType === "array") {
         if (schema.items) {
             return code.assign(
-                `z.array(${
-                    getZodSchema({ schema: schema.items, ctx, meta, options }).toString()
-                }${
-                    getZodChain({
-                        schema: schema.items as SchemaObject,
-                        meta: { ...meta, isRequired: true },
-                        options,
-                    })
-                })${readonly}`
+                `z.array(${getZodSchema({ schema: schema.items, ctx, meta, options }).toString()}${getZodChain({
+                    schema: schema.items as SchemaObject,
+                    meta: { ...meta, isRequired: true },
+                    options,
+                })})${readonly}`
             );
         }
 
@@ -305,11 +302,13 @@ type ZodChainArgs = { schema: SchemaObject; meta?: CodeMetaData; options?: Templ
 export const getZodChain = ({ schema, meta, options }: ZodChainArgs) => {
     const chains: string[] = [];
 
-    match(schema.type)
-        .with("string", () => chains.push(getZodChainableStringValidations(schema)))
-        .with("number", "integer", () => chains.push(getZodChainableNumberValidations(schema)))
-        .with("array", () => chains.push(getZodChainableArrayValidations(schema)))
-        .otherwise(() => void 0);
+    if (!(meta?.name && meta.name === meta.discriminatorProperty)) {
+        match(schema.type)
+            .with("string", () => chains.push(getZodChainableStringValidations(schema)))
+            .with("number", "integer", () => chains.push(getZodChainableNumberValidations(schema)))
+            .with("array", () => chains.push(getZodChainableArrayValidations(schema)))
+            .otherwise(() => void 0);
+    }
 
     if (typeof schema.description === "string" && schema.description !== "" && options?.withDescription) {
         if (["\n", "\r", "\r\n"].some((c) => String.prototype.includes.call(schema.description, c))) {
@@ -322,7 +321,7 @@ export const getZodChain = ({ schema, meta, options }: ZodChainArgs) => {
     const output = chains
         .concat(
             getZodChainablePresence(schema, meta),
-            options?.withDefaultValues !== false ? getZodChainableDefault(schema) : []
+            options?.withDefaultValues !== false ? getZodChainableDefault(schema, meta) : []
         )
         .filter(Boolean)
         .join(".");
@@ -330,6 +329,10 @@ export const getZodChain = ({ schema, meta, options }: ZodChainArgs) => {
 };
 
 const getZodChainablePresence = (schema: SchemaObject, meta?: CodeMetaData) => {
+    if (meta?.name && meta.name === meta.discriminatorProperty) {
+        return "";
+    }
+
     if (schema.nullable && !meta?.isRequired) {
         return "nullish()";
     }
@@ -354,7 +357,11 @@ const unwrapQuotesIfNeeded = (value: string | number) => {
     return value;
 };
 
-const getZodChainableDefault = (schema: SchemaObject) => {
+const getZodChainableDefault = (schema: SchemaObject, meta?: CodeMetaData) => {
+    if (meta?.name && meta.name === meta.discriminatorProperty) {
+        return "";
+    }
+
     if (schema.default !== undefined) {
         const value = match(schema.type)
             .with("number", "integer", () => unwrapQuotesIfNeeded(schema.default))

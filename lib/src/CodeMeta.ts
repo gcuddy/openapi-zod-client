@@ -16,6 +16,7 @@ export type CodeMetaData = {
     name?: string;
     parent?: CodeMeta;
     referencedBy?: CodeMeta[];
+    discriminatorProperty?: string;
 };
 
 type DefinedCodeMetaProps = "referencedBy";
